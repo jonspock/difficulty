@@ -7,9 +7,12 @@ import random
 import statistics
 import sys
 import time
+import numpy, matplotlib
 from collections import namedtuple
 from functools import partial
 from operator import attrgetter
+matplotlib.use('qt5agg')
+import matplotlib.pyplot as plt
 
 def bits_to_target(bits):
     size = bits >> 24
@@ -82,7 +85,7 @@ GREEDY_HASHRATE = 2000     # In PH/s.
 GREEDY_PCT = 10
 GREEDY_WINDOW = 6
 
-IDEAL_BLOCK_TIME = 10 * 60
+IDEAL_BLOCK_TIME = 1 * 60
 
 State = namedtuple('State', 'height wall_time timestamp bits chainwork fx '
                    'hashrate rev_ratio greedy_frac msg')
@@ -94,7 +97,24 @@ def print_headers():
     print(', '.join(['Height', 'FX', 'Block Time', 'Unix', 'Timestamp',
                      'Difficulty (bn)', 'Implied Difficulty (bn)',
                      'Hashrate (PH/s)', 'Rev Ratio', 'Greedy?', 'Comments']))
+def new_print_state():
+    state = states[-1]
+    block_time = state.timestamp - states[-2].timestamp
+    t = datetime.datetime.fromtimestamp(state.timestamp)
+    difficulty = TARGET_1 / bits_to_target(state.bits)
+    implied_diff = TARGET_1 / ((2 << 255) / (state.hashrate * 1e15 * IDEAL_BLOCK_TIME))
+    print(', '.join(['{:d}'.format(state.height),
+                     '{:.8f}'.format(state.fx),
+                     '{:d}'.format(block_time),
+                     '{:d}'.format(state.timestamp),
+                     '{:%Y-%m-%d %H:%M:%S}'.format(t),
+                     '{:.2f}'.format(difficulty / 1e9),
+                     '{:.2f}'.format(implied_diff / 1e9),
+                     '{:.0f}'.format(state.hashrate),
+                     '{:.3f}'.format(state.rev_ratio)
+                     ]))
 
+    
 def print_state():
     state = states[-1]
     block_time = state.timestamp - states[-2].timestamp
@@ -112,6 +132,16 @@ def print_state():
                      '{:.3f}'.format(state.rev_ratio),
                      'Yes' if state.greedy_frac == 1.0 else 'No',
                      state.msg]))
+    
+def plot_state():
+    state = states[-1]
+    block_time = state.timestamp - states[-2].timestamp
+    t = datetime.datetime.fromtimestamp(state.timestamp)
+    difficulty = TARGET_1 / bits_to_target(state.bits)
+    implied_diff = TARGET_1 / ((2 << 255) / (state.hashrate * 1e15 * IDEAL_BLOCK_TIME))
+    #return difficulty
+    #print("block_time=",block_time)
+    return block_time
 
 def revenue_ratio(fx, BCC_target):
     '''Returns the instantaneous SWC revenue rate divided by the
@@ -188,6 +218,35 @@ def compute_target(first_index, last_index):
     work //= states[last_index].timestamp - states[first_index].timestamp
     return (2 << 255) // work - 1
 
+def next_bits_d(msg):
+    N = len(states) - 1
+    index_last = suitable_block_index(N)
+    index_first = suitable_block_index(N - 2016)
+    interval_target = compute_target(index_first, index_last)
+    index_fast = compute_index_fast(index_last)
+    fast_target = compute_target(index_fast, index_last)
+
+    next_target = interval_target
+    if (fast_target < interval_target - (interval_target >> 2) or
+        fast_target > interval_target + (interval_target >> 2)):
+        msg.append("fast target")
+        next_target = fast_target
+    else:
+        msg.append("interval target")
+
+    prev_target = bits_to_target(states[-1].bits)
+    min_target = prev_target - (prev_target >> 3)
+    if next_target < min_target:
+        msg.append("min target")
+        return target_to_bits(min_target)
+
+    max_target = prev_target + (prev_target >> 3)
+    if next_target > max_target:
+        msg.append("max target")
+        return target_to_bits(max_target)
+
+    return target_to_bits(next_target)
+
 def compute_cw_target(block_count):
     N = len(states) - 1
     last = suitable_block_index(N)
@@ -196,6 +255,19 @@ def compute_cw_target(block_count):
     timespan = max(block_count * IDEAL_BLOCK_TIME // 2, min(block_count * 2 * IDEAL_BLOCK_TIME, timespan))
     work = (states[last].chainwork - states[first].chainwork) * IDEAL_BLOCK_TIME // timespan
     return (2 << 255) // work - 1
+
+def next_bits_sha(msg):
+    primes = [73, 79, 83, 89, 97,
+              101, 103, 107, 109, 113, 127,
+              131, 137, 139, 149, 151]
+
+    # The timestamp % len(primes) is a proxy for previous
+    # block SHAx2 % len(primes), but that data is not available
+    # in this simulation
+    prime = primes[states[-1].timestamp % len(primes)]
+
+    interval_target = compute_cw_target(prime)
+    return target_to_bits(interval_target)
 
 def next_bits_cw(msg, block_count):
     interval_target = compute_cw_target(block_count)
@@ -261,6 +333,106 @@ def next_bits_wtema(msg, alpha_recip):
     next_target = max(min(next_target, prior_target + max_change),
                       prior_target - max_change)
     return target_to_bits(next_target)
+
+
+def next_bits_bitc(msg, block_count):
+    ''' BitCash '''
+    block_reading = -1 # dito
+    counted_blocks = 0
+    i = 1
+
+    times = []
+    j = 0
+    # get a list of time stamps **assuming monotonic**
+    while j < block_count:
+        times.append(states[block_reading].timestamp)
+        block_reading -= 1
+        j += 1
+
+    block_reading = -1
+    
+    bnTargetNow = bits_to_target(states[block_reading].bits)
+    while states[block_reading].height > 0:
+        if i > block_count:
+            break
+        counted_blocks += 1
+        current_time = times[i-1]
+        
+        if counted_blocks <= block_count:
+            if counted_blocks == 1:
+                actual_time_span=0
+            else:
+                time_diff = (lasttime-current_time)* bits_to_target(states[block_reading].bits) // bnTargetNow
+                actual_time_span += time_diff
+            lasttime = current_time
+            
+        block_reading -= 1
+        i += 1
+        
+    target_time_span = counted_blocks * IDEAL_BLOCK_TIME
+    
+    if actual_time_span < (target_time_span // 3):      actual_time_span = target_time_span // 3
+    if actual_time_span > (target_time_span * 3):       actual_time_span = target_time_span * 3
+    
+    target = bnTargetNow // target_time_span
+    target *= actual_time_span
+
+    if target > MAX_TARGET:
+        return MAX_BITS
+    else:
+        return target_to_bits(int(target))
+
+
+def next_bits_dgw3(msg, block_count):
+    ''' Dark Gravity Wave v3 from Dash '''
+    block_reading = -1 # dito
+    counted_blocks = 0
+    last_block_time = 0
+    actual_time_span = 0
+    past_difficulty_avg = 0
+    past_difficulty_avg_prev = 0
+    i = 1
+    while states[block_reading].height > 0:
+        if i > block_count:
+            break
+        counted_blocks += 1
+        if counted_blocks <= block_count:
+            if counted_blocks == 1:
+                past_difficulty_avg = bits_to_target(states[block_reading].bits)
+            else:
+                past_difficulty_avg = ((past_difficulty_avg_prev * counted_blocks) + bits_to_target(states[block_reading].bits)) // ( counted_blocks + 1 )
+        past_difficulty_avg_prev = past_difficulty_avg
+        if last_block_time > 0:
+            diff = last_block_time - states[block_reading].timestamp
+            actual_time_span += diff
+        last_block_time = states[block_reading].timestamp
+        block_reading -= 1
+        i += 1
+    target_time_span = counted_blocks * IDEAL_BLOCK_TIME
+    target = past_difficulty_avg
+    if actual_time_span < (target_time_span // 3):
+        actual_time_span = target_time_span // 3
+    if actual_time_span > (target_time_span * 3):
+        actual_time_span = target_time_span * 3
+    target = target // target_time_span
+    target *= actual_time_span
+    if target > MAX_TARGET:
+        return MAX_BITS
+    else:
+        return target_to_bits(int(target))
+
+def next_bits_m2(msg, window_1, window_2):
+    interval_target = compute_target(-1 - window_1, -1)
+    interval_target += compute_target(-2 - window_2, -2)
+    return target_to_bits(interval_target >> 1)
+
+def next_bits_m4(msg, window_1, window_2, window_3, window_4):
+    interval_target = compute_target(-1 - window_1, -1)
+    interval_target += compute_target(-2 - window_2, -2)
+    interval_target += compute_target(-3 - window_3, -3)
+    interval_target += compute_target(-4 - window_4, -4)
+    return target_to_bits(interval_target >> 2)
+
 
 def next_bits_ema(msg, window):
     """This calculates difficulty (1/target) as proportional to the recent hashrate, where "recent hashrate" is estimated by an EMA (exponential moving avg) of recent "hashrate observations", and
@@ -429,6 +601,15 @@ Algos = {
     'wt-144' : Algo(next_bits_wt, {
         'block_count': 144
     }),
+    'bitc' : Algo(next_bits_bitc, { # 24-blocks, like Dash
+        'block_count': 24,
+    }),
+    'dgw3-24' : Algo(next_bits_dgw3, { # 24-blocks, like Dash
+        'block_count': 24,
+    }),
+    'dgw3-144' : Algo(next_bits_dgw3, { # 1 full day
+        'block_count': 144,
+    }),
     # runs wt-144 in external program, compares with python implementation.
     'wt-144-compare' : Algo(next_bits_wt_compare, {
         'block_count': 144
@@ -478,7 +659,7 @@ Scenarios = {
     'ft100' : Scenario(next_fx_random, {}, -100, 0),
 }
 
-def run_one_simul(algo, scenario, print_it):
+def run_one_simul(algo, scenario, print_it, plot_it):
     states.clear()
 
     # Initial state is afer 2020 steady prefix blocks
@@ -498,20 +679,25 @@ def run_one_simul(algo, scenario, print_it):
         fx_jumps[random.randrange(10000)] = random.choice(factor_choices)
 
     # Run the simulation
-    if print_it:
-        print_headers()
-    for n in range(10000):
+    if print_it:       print_headers()
+
+    samples = 10000
+    diff = numpy.zeros(samples)
+    
+    for n in range(samples):
         fx_jump_factor = fx_jumps.get(n, 1.0)
         next_step(algo, scenario, fx_jump_factor)
         if print_it:
             print_state()
+        elif plot_it:
+            diff[n] = plot_state()
 
     # Drop the prefix blocks to be left with the simulation blocks
     simul = states[N:]
 
     block_times = [simul[n + 1].timestamp - simul[n].timestamp
                    for n in range(len(simul) - 1)]
-    return block_times
+    return (block_times,diff)
 
 
 def main():
@@ -520,7 +706,7 @@ def main():
     parser = argparse.ArgumentParser('Run a mining simulation')
     parser.add_argument('-a', '--algo', metavar='algo', type=str,
                         choices = list(Algos.keys()),
-                        default = 'k-1', help='algorithm choice')
+                        default = 'wtema-100', help='algorithm choice')
     parser.add_argument('-s', '--scenario', metavar='scenario', type=str,
                         choices = list(Scenarios.keys()),
                         default = 'default', help='scenario choice')
@@ -542,14 +728,33 @@ def main():
     std_devs = []
     medians = []
     maxs = []
+
+    plot_it = True
+    #count = 1
+    save_algo = Algos.get('dgw3-24')
+    other_title = args.algo
+    graph_type = args.scenario
+    
     for loop in range(count):
         random.seed(seed)
-        seed += 1
-        block_times = run_one_simul(algo, scenario, count == 1)
+        #seed += 1
+        (block_times,diff_data) = run_one_simul(algo, scenario, count < 1, plot_it)
         means.append(statistics.mean(block_times))
         std_devs.append(statistics.stdev(block_times))
         medians.append(sorted(block_times)[len(block_times) // 2])
         maxs.append(max(block_times))
+
+        #print("alg = ",algo.next_bits)
+        if (loop == 0) and (count > 1):
+            plt.plot(diff_data,'r',label=other_title)
+        else:
+            plt.plot(diff_data,'g',label='dgw3-24')
+        algo = save_algo
+
+    plt.legend()
+    plt.grid()
+    plt.title(graph_type)
+    plt.show()
 
     def stats(text, values):
         if count == 1:
