@@ -681,7 +681,7 @@ def run_one_simul(algo, scenario, print_it, plot_it):
     # Run the simulation
     if print_it:       print_headers()
 
-    samples = 10000
+    samples = 40000
     diff = numpy.zeros(samples)
     
     for n in range(samples):
@@ -722,6 +722,7 @@ def main():
     seed = int(time.time()) if args.seed is None else args.seed
 
     to_stderr = partial(print, file=sys.stderr)
+    #seed = 1230931
     to_stderr("Starting seed {} for {} simuls".format(seed, count))
 
     means = []
@@ -760,12 +761,8 @@ def main():
         if count == 1:
             to_stderr('{} {}s'.format(text, values[0]))
         else:
-            to_stderr('{}(s) Range {:0.1f}-{:0.1f} Mean {:0.1f} '
-                      'Std Dev {:0.1f} Median {:0.1f}'
-                      .format(text, min(values), max(values),
-                              statistics.mean(values),
-                              statistics.stdev(values),
-                              sorted(values)[len(values) // 2]))
+            to_stderr('{}(s) Range dgw3-24 {:0.1f} vs {} {:0.1f} '
+                      .format(text, min(values), other_title, max(values)))
 
     stats("Mean   block time", means)
     stats("StdDev block time", std_devs)
